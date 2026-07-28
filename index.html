@@ -2653,13 +2653,36 @@ function isSessionId(id){ return typeof id === 'string' && id.startsWith('sess-'
 
 // Storage (never throws) — serialized queue + retry to avoid concurrent-write race conditions
 let storageQueue = Promise.resolve();
+// Storage layer. Inside the Claude artifact preview, window.storage exists.
+// Everywhere else (GitHub Pages, home-screen web app, plain browser) it does
+// NOT, so we fall back to real localStorage — otherwise nothing persists and
+// data resets when the app closes.
+const HAS_WINDOW_STORAGE = (() => {
+  try{ return !!(window.storage && typeof window.storage.get === 'function' && typeof window.storage.set === 'function'); }
+  catch(e){ return false; }
+})();
+const LS_PREFIX = 'fdlog:'; // namespace so it can't collide with anything else
+
 async function storageGet(key, fallback){
-  try{ const r = await window.storage.get(key, false); if(!r) return fallback; return JSON.parse(r.value); }
-  catch(e){ return fallback; }
+  try{
+    if(HAS_WINDOW_STORAGE){
+      const r = await window.storage.get(key, false);
+      if(!r) return fallback;
+      return JSON.parse(r.value);
+    }
+    const raw = localStorage.getItem(LS_PREFIX + key);
+    if(raw === null) return fallback;
+    return JSON.parse(raw);
+  }catch(e){ return fallback; }
 }
 async function storageSet(key, value){
   storageQueue = storageQueue.then(async () => {
     const payload = JSON.stringify(value);
+    if(!HAS_WINDOW_STORAGE){
+      try{ localStorage.setItem(LS_PREFIX + key, payload); }
+      catch(e){ /* quota or private-mode; nothing else we can do */ }
+      return;
+    }
     for(let attempt = 0; attempt < 2; attempt++){
       try{
         await window.storage.set(key, payload, false);
